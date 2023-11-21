@@ -1,0 +1,773 @@
+---
+title: "preprocess"
+author: "Izar de Villasante"
+params:
+  ss: "samplesheet_FULL"
+  betas: "betas_FULL"
+format: 
+  html:
+    toc: true
+    toc-depth: 4
+    toc-expand: 2
+    # self-contained: true
+    embed-resources: true
+    code-fold: true
+# server: shiny
+execute:
+  cache: true
+---
+
+```{r}
+#| context: data
+#| include: false
+
+library(rlang)
+library(targets)
+library(data.table)
+ss<-data.table::as.data.table(tar_read(ss_clean_PDC11_batch2))
+```
+
+```{r}
+# targets::tar_load(params2$ss)
+# ss<-eval(rlang::sym(params2$ss))
+
+```
+
+## Illumina Infinium Methylation Arrays
+
+This technical guide covers how to analyze Illumina methylation Beadchips arrays commonly known as EPIC/450K methylation arrays. [here some description about a methylation array and how it is prepeared...](https://emea.support.illumina.com/content/dam/illumina-support/documents/documentation/chemistry_documentation/infinium_assays/infinium_hd_methylation/infinium-hd-methylation-guide-15019519-01.pdf)
+
+## Preprocessing
+
+The first step once you have your data is to load it to R in an appropriate format. The ´minfi´ packages provides read.metharray functions for this purpose. Also the functions `read.metharray.sheet`, `read.metharray.exp` can be used. Those are wrappers around `read.metharray` to make it easier for the user. [Check this guideline](https://bioconductor.org/packages/devel/bioc/vignettes/minfi/inst/doc/minfi.html#3_Reading_data) or type `vignette("minfi)` on an R console for more info. In this case a built in function `cnv.methyl::read.metharray.exp.par()` is used which is a wrapper for minfi formula with parallelization to speed up this process a little bit.
+
+In order to use any of this formulas we first need to generate the sample_sheet.
+
+### Sample sheet
+
+The sample sheet contains inforamtion about your samples and the experimental setup. It is mandatory to respect the column names in order to make the pipline work. ##It must contain the following columns: - Sample_Name - Basename
+
+##Other recommended columns with technical details. Can be used to track and detect batch effects: - Project - Pool_ID - Sample_Plate - Sample_Well - Sample_Group - Sentrix_ID - Sentrix_Position
+
+##Pheno columns: - Gender (will be predicted) - Type - Condition - Any other information
+
+In the following table, you can take a look at the sample sheet used for this project.
+
+```{r}
+#| context: server-start
+# 
+# renv::install("circlize")
+# renv::install("RColorBrewer")
+# renv::install("DT")
+# renv::install("ggplot2")
+# renv::install("shiny")
+# renv::install("shinyWidgets")
+# renv::install("ggplot2")
+# renv::install("data.table")
+# renv::install("writexl")
+
+library("circlize")
+library("RColorBrewer")
+library("DT")
+library("ggplot2")
+library("shiny")
+library("shinyWidgets")
+library("data.table")
+library("writexl")
+
+top_beta <- function(beta_values, n=1000){
+  sdv <- apply(beta_values, 1, sd)
+  top100 <- names(head(sort(sdv,decreasing=T), n))
+  beta_top100 <- beta_values[top100,]
+  return(beta_top100)
+}
+
+```
+
+```{r dtable}
+dtable<-function(data){
+  DT::datatable(
+        { data},
+        filter = 'top',
+        # selection = list(mode = 'multiple', selected = c(1:10), target = 'column', selectable = c(-2, -3)),
+        fillContainer = F,
+        # style =  "bootstrap",
+
+        extensions = 'Buttons',
+
+        options = list(
+          paging = TRUE,
+          searching = TRUE,
+          fixedColumns = TRUE,
+          autoWidth = FALSE,
+          scrollX=TRUE,
+          digits=4,
+          ordering = TRUE,
+          dom = 'Bfrtip',
+          buttons = list(
+            list(
+              extend = "collection",
+              text = 'download entire dataset',
+              action = DT::JS("function ( e, dt, node, config ) {
+                                                    Shiny.setInputValue('test', true, {priority: 'event'});
+                                                    }")
+            ),
+            'copy',
+            'csv',
+            'excel'
+          ),
+
+          class = "display",
+          server=TRUE
+        ),
+      ) |> DT::formatRound(which(sapply(data,is.double)),4)
+}
+```
+
+```{r}
+#| context: server
+myModal <- function() {
+
+  div(id = "test",
+      shiny::modalDialog(downloadButton("download1","Download data as csv"),
+                         br(),
+                         br(),
+                         downloadButton("download2","Download data as excel"),
+                         easyClose = TRUE, title = "Download Table")
+  )
+}
+
+renderDT<- function(data){
+  output$dtable <- DT::renderDataTable({
+    dtable(data)
+  })
+
+    shiny::observeEvent(input$test, {
+      print("hello")
+      showModal(myModal())
+    })
+    output$download1 <- shiny::downloadHandler(
+      filename = function() {
+        paste("data-", Sys.Date(), ".csv", sep="")
+      },
+      content = function(file) {
+        write.csv(data, file)
+      }
+    )
+
+    output$download2 <- shiny::downloadHandler(
+      filename = function() {
+        paste("data-", Sys.Date(), ".xlsx", sep="")
+      },
+      content = function(file) {
+        writexl::write_xlsx(data, file)
+      })
+}
+
+```
+
+```{r}
+
+dtable(data.table::as.data.table(ss))
+```
+
+## Heatmap {#sec-Heatmap}
+
+First of all let's define some functions for the color scales our heatmap will use:
+
+### Color functions:
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+# Simple continuous palette: 
+col_fun = colorRamp2(c(-1,-0.1, 0.1, 1), c("blue","white","white","red"))
+
+# Continuous, uses a predefined color palette or manual color vector
+col_fn<- function(x,n=100,palette=viridis::cividis(n)){
+  colorRamp2( seq(min(x),max(x),length.out=n), palette)
+}
+
+# Continuous, monochrome breakpoints based on values distribution (quartiles):
+col_fq <- function(x,probs=c(0,0.25,0.5,0.75,1),color ){
+  colorRamp2( quantile(x,probs=probs), 
+              monochromeR::generate_palette("white",
+                blend_colour = color,  n_colours = length(probs)
+                )
+  )
+}
+
+# Continuous, monochrome can manually set breakpoints:
+col_fbp <- function(x,bp,color){
+  colorRamp2( bp, 
+              monochromeR::generate_palette("white",
+                blend_colour = color,  n_colours = length(bp)
+                )
+              )
+}
+
+```
+
+### Heatmaps function
+
+Here we define the function for the heat maps
+
+```{r heatmap function}
+library(ComplexHeatmap)
+
+
+meth_heatmap <- function(samplesheet, bvals, annotation, idcol="rn"   ){
+  require(ComplexHeatmap)
+  require(data.table)
+  data.table::setDT(annotation)
+  setkeyv(annotation,idcol)
+  
+  # Annotation object for top annotation:
+  data.table::setDT(samplesheet)
+  # purity = samplesheet[,.SD,.SDcols=startsWith(names(samplesheet),"purity")]
+  ha_column = HeatmapAnnotation(
+    annotation_name_side = "left", 
+    Type = anno_block(gp=gpar(fill= rainbow(n=length(unique(samplesheet$Type)))),
+                      labels = unique(samplesheet$Type), #unique(samplesheet$Type),
+                      labels_gp = gpar(col = "white", fontsize = 10)),
+    Condition = samplesheet$Condition,
+    # purity = unlist(purity),
+
+    col = #A list of named vectors were names = vector values and value = color.
+      list(
+      Condition = setNames(
+        palette.colors(length(unique(samplesheet$Condition)),
+                       palette = "Dark"
+                       ),
+        unique(samplesheet$Condition)
+      ),
+      # purity = col_fbp(x=samplesheet,bp=seq(min(purity),max(purity),length.out=5),color="green3"),
+      NULL
+      )
+  )
+  
+  heat_list<-ComplexHeatmap::Heatmap(
+      matrix = bvals, 
+            #Color:
+            col=col_fn(bvals),#col_fun, # Color defined in col_fun above
+            na_col="grey",
+            
+            #Label:
+            heatmap_legend_param = list(
+            at = c(0, 0.5, 1),
+            # labels = c("hypo", 0, "hyper"),
+            title = paste0(expression(beta),"-vals"),
+            legend_height = unit(4, "cm"),
+            title_position = "leftcenter-rot"
+            ),
+            
+            
+            #Rows:
+            show_row_names = F,
+            #row_title = "Amino acids",
+            row_names_side = "left",
+            #left_annotation = ha_boxplot,
+            # clustering_distance_rows = "manhattan",
+            
+            #Columns:
+            show_column_names = TRUE,
+            column_names_side = "top",
+            column_title_side = "bottom",
+            column_names_max_height = unit(4, "cm"),
+            column_names_gp = gpar(fontsize = 9),
+            column_names_rot = 90,
+            cluster_columns=F,
+            column_split = samplesheet$Type, #factor(samplesheet$Type,levels = c("Case","Control")),
+            column_title = paste0(expression(beta)," values"),
+  
+            #Annotation bar:
+            top_annotation = ha_column,
+           
+              
+            
+            #Aspect ratios:
+            #column_dend_height=unit(4, "cm")
+             heatmap_width = unit(2, "npc"),
+            heatmap_height = unit(16, "cm"),
+                )
+  # Add methylation difference heatmap:  
+  for (contrast in unique(annotation$Contrast))
+  {
+
+    DMPann <- annotation[ Contrast==contrast,]
+    # make sure to have one and only one bval for each cg probe, if more than one do mean:
+    setDT(DMPann)
+    setkeyv(DMPann,idcol)
+    # Remove all annotation but methylation difference in contrast and probeid:
+    mat<-DMPann[rownames(bvals) ,.SD,on=idcol,.SDcols=c("diff_meanMeth",idcol)]
+    # If more than one id (idcol) do the mean
+    mat<-mat[,.(bval=mean(diff_meanMeth)),by=idcol]
+    mat<-mat$bval
+    heat_list = heat_list + Heatmap(
+      matrix = mat, 
+      name = contrast,
+            #Color:
+            col=col_fun,#col_fun, # Color defined in col_fun above
+            na_col="white",
+            
+            #Legend:
+            heatmap_legend_param = list(
+            at = c(-1, -0.1, 0.1, 1),
+            # labels = c("hypo", "", "", "hyper"),
+            title = paste0(expression(beta),"diff"),
+            legend_height = unit(4, "cm"),
+            title_position = "leftcenter-rot"
+            ),
+      show_heatmap_legend = ifelse(contrast == unique(annotation$Contrast)[1],T,F ),
+            
+            #Columns:
+            show_column_names = TRUE,
+            column_names_side = "top",
+            column_names_max_height = unit(2, "cm"),
+            column_names_gp = gpar(fontsize = 9),
+            column_names_rot = 90,
+            heatmap_width = unit(2, "npc"),
+            
+                )
+    
+  }
+  # Add annotation
+  ann<-annotation[,.(V1=unique(Relation_to_Island)),by=idcol]
+  
+  mat<-ann[rownames(bvals),V1,on=idcol]
+  heat_list<-heat_list + 
+    Heatmap(
+      matrix = mat, 
+      name = "Relation to island",
+      #Color:
+      col=setNames(palette.colors(length(unique(annotation$Relation_to_Island)),palette = "Set1"),sort(unique(annotation$Relation_to_Island))),#col_fun, # Color defined in col_fun above
+      #Legend:
+      show_heatmap_legend = TRUE,
+      show_column_names = TRUE,
+      column_names_side = "top",
+      column_names_max_height = unit(2, "cm"),
+      column_names_gp = gpar(fontsize = 9),
+      column_names_rot = 90,
+      heatmap_width = unit(1, "npc"),
+            
+                )
+} 
+
+```
+
+## PDC11
+
+### Methylation data: The 2-channel methylation intensity file format .idat
+
+```{r}
+ss_PDC11 <- data.table::as.data.table(tar_read(ss_clean_PDC11_batch2))
+betas_PDC11 <- tar_read(betas_PDC11_batch2)
+colnames(betas_PDC11) <- ss_PDC11[colnames(betas_PDC11),Sample_Name,on="barcode"]
+
+# Sort by type:
+ss_PDC11 <- setorder(ss_PDC11,Type)
+betas_PDC11<-betas_PDC11[,ss_PDC11$Sample_Name]
+```
+
+### DMPs Annotation data:
+
+A dataframe with differentially methylated probes and annotation.
+
+```{r}
+library(data.table)
+
+DMPann_PDC11<-tar_read(dmps_mod1_PDC11_batch2)
+DMPann_PDC11<-data.table::setDT(DMPann_PDC11)
+idcol<-"EPICv1_Loci"
+setkeyv(DMPann_PDC11,idcol)
+PROBEIDS <- intersect (rownames(betas_PDC11), DMPann_PDC11[[idcol]])
+betas_PDC11 <- betas_PDC11[PROBEIDS,]
+DMPann_PDC11 <- DMPann_PDC11[PROBEIDS,]
+#Transform to data.table format to visualize and perform data manipulations
+DMPann_PDC11<-data.table::setDT(DMPann_PDC11)
+```
+
+### Heatmap
+
+```{r}
+
+heat_list_PDC11<-meth_heatmap(samplesheet = ss_PDC11, bvals = betas_PDC11, annotation = DMPann_PDC11, idcol = idcol)
+ComplexHeatmap::draw(heat_list_PDC11, row_title = paste0("top ",NROW(betas_PDC11)," across-sample most variable sites"), row_title_gp = gpar(col = "darkblue"),
+    column_title = "PDC11 cell line Differentially Methylated Probes Heatmap", column_title_gp = gpar(fontsize = 16),  merge_legend = TRUE)
+
+ 
+```
+
+## H358
+
+### Methylation data: The 2-channel methylation intensity file format .idat
+
+```{r}
+ss_H358 <- data.table::as.data.table(tar_read(ss_clean_H358))
+betas_H358 <- tar_read(top_H358)
+colnames(betas_H358) <- ss_H358[colnames(betas_H358),Sample_Name,on="barcode"]
+# Sort by type:
+setorder(ss_H358,Type)
+betas_H358<-betas_H358[,ss_H358$Sample_Name]
+
+
+```
+
+### DMPs Annotation data:
+
+A dataframe with differentially methylated probes and annotation.
+
+```{r}
+library(data.table)
+
+DMPann_H358<-tar_read(dmps_mod1_H358)
+DMPann_H358<-data.table::setDT(DMPann_H358)
+idcol<-"Name"
+setkeyv(DMPann_H358,idcol)
+PROBEIDS <- intersect (rownames(betas_H358), DMPann_H358[[idcol]])
+betas_H358 <- betas_H358[PROBEIDS,]
+DMPann_H358 <- DMPann_H358[PROBEIDS,]
+#Transform to data.table format to visualize and perform data manipulations
+DMPann_H358<-data.table::setDT(DMPann_H358)
+```
+
+### Heatmap
+
+```{r}
+
+heat_list_H358<-meth_heatmap(samplesheet = ss_H358, bvals = betas_H358, annotation = DMPann_H358, idcol = idcol)
+ComplexHeatmap::draw(heat_list_H358, row_title = paste0("top ",NROW(betas_H358)," across-sample most variable sites"), row_title_gp = gpar(col = "darkblue"),
+    column_title = "H358 cell line Differentially Methylated Probes Heatmap", column_title_gp = gpar(fontsize = 16),  merge_legend = TRUE)
+
+ 
+```
+
+## H2009
+
+### Methylation data: The 2-channel methylation intensity file format .idat
+
+```{r}
+ss_H2009 <- data.table::as.data.table(tar_read(ss_clean_H2009))
+betas_H2009 <- tar_read(top_H2009)
+colnames(betas_H2009) <- ss_H2009[colnames(betas_H2009),Sample_Name,on="barcode"]
+# Sort by type:
+setorder(ss_H2009,Type)
+betas_H2009<-betas_H2009[,ss_H2009$Sample_Name]
+
+```
+
+### DMPs Annotation data:
+
+A dataframe with differentially methylated probes and annotation.
+
+```{r}
+library(data.table)
+
+DMPann_H2009<-tar_read(dmps_mod1_H2009)
+DMPann_H2009<-data.table::setDT(DMPann_H2009)
+idcol<-"Name"
+setkeyv(DMPann_H2009,idcol)
+PROBEIDS <- intersect (rownames(betas_H2009), DMPann_H2009[[idcol]])
+betas_H2009 <- betas_H2009[PROBEIDS,]
+DMPann_H2009 <- DMPann_H2009[PROBEIDS,]
+#Transform to data.table format to visualize and perform data manipulations
+DMPann_H2009<-data.table::setDT(DMPann_H2009)
+```
+
+### Heatmap
+
+```{r}
+
+heat_list_H2009<-meth_heatmap(samplesheet = ss_H2009, bvals = betas_H2009, annotation = DMPann_H2009, idcol = idcol)
+ComplexHeatmap::draw(heat_list_H2009, row_title = paste0("top ",NROW(betas_H2009)," across-sample most variable sites"), row_title_gp = gpar(col = "darkblue"),
+    column_title = "H2009 cell line Differentially Methylated Probes Heatmap", column_title_gp = gpar(fontsize = 16),  merge_legend = TRUE)
+
+ 
+```
+
+# Save Heatmaps:
+
+## Plot size:
+
+There are many things you can do in order to change the plot size and aesthetics. I won't go in detail but I think that getting the right plot size can be a bit tricky. So here is some advice on how to get it right. Here is a function to get the width and hight of your plot.
+
+```{r calc_ht_size function}
+#| cache: true
+calc_ht_size = function(ht, unit = "inch") {
+    pdf(NULL)
+    ht = ComplexHeatmap::draw(ht)
+    w = ComplexHeatmap:::width(ht)
+    w = convertX(w, unit, valueOnly = TRUE)
+    h = ComplexHeatmap:::height(ht)
+    h = convertY(h, unit, valueOnly = TRUE)
+    dev.off()
+
+    c(w, h)
+}
+```
+
+```{r calc size}
+
+size <- calc_ht_size(heat_list_PDC11)
+pdf(paste0("PDC11_heatmap.pdf"), width = size[1], height = size[2])
+heat_list_PDC11
+dev.off()
+size <- calc_ht_size(heat_list_H2009)
+pdf(paste0("H2009_heatmap.pdf"), width = size[1], height = size[2])
+heat_list_H2009
+dev.off()
+size <- calc_ht_size(heat_list_H358)
+pdf(paste0("H358_heatmap.pdf"), width = size[1], height = size[2])
+heat_list_H358
+dev.off()
+```
+
+::: {#fig-heatpdf layout-ncol="1"}
+![PDC11](PDC11_heatmap.pdf){#fig-PDC11 width="95%"}
+
+![H358](H358_heatmap.pdf){#fig-H358 width="95%"}
+
+![H2009](H2009_heatmap.pdf){#fig-H2009 width="95%"}
+:::
+
+When the number of rows is high the image gets compressed and we can loose some information. Also, sometimes we have different heatmaps with a different number of rows for each of them, which results on different aspect ratios. If we want to control the height of each row and keep it stable between plots we must consider: - By convention resolution in R is 96, which means 96 pixels fit on an inch. So if you don't want to loose any line your cell height should be 1 pixel tall at least. 96 lines in 1 inch means each line is 0.26mm which is already very small, so don't try to make it smaller.
+
+-   Complexheatmat default top and bottom margins are 2mm so you must add those 4mm to your plot size.
+-   The relationship between main heatmap object and cell height is proportional: The height of the main plot is controlled by the height parameter the rest is annotation as explained in the docs. So let's find the ratio for a given cell size:
+
+```{r}
+#| cache: true
+library(ComplexHeatmap)
+plotsizes=c(100,200)
+y = NULL
+for(nr in plotsizes) {
+  betas<-top_beta(betas_PDC11,nr)
+  
+    ht = ComplexHeatmap::draw(meth_heatmap(ss_PDC11,betas,annotation = DMPann_PDC11,idcol = "EPICv1_Loci"),height=unit(1/96, "inch")*nr)
+    ht_height = sum(component_height(ht)) + unit(4, "mm")
+    ht_height = convertHeight(ht_height, "inch", valueOnly = TRUE)
+    y = c(y, ht_height)
+}
+sizemod <- lm(y ~ plotsizes)
+sizemod
+```
+
+Now we use the formula to control for the plot size, so we can make the plots from the different cell lines proportional in row height:
+
+```{r}
+#| cache: false
+ png(paste0("PDC11_heatmap_resized.png"),
+     width =  14,
+     height = sizemod$coefficients[2]*NROW(betas_PDC11) + sizemod$coefficients[1],
+     units = "in",
+     res = 96
+     )
+ComplexHeatmap::draw(heat_list_PDC11, row_title = paste0("top ",NROW(betas_PDC11) ," across-sample EPICv1 most variable sites"), row_title_gp = gpar(col = "darkblue") , height = unit(1*1/96, "inch")*NROW(betas_PDC11), column_title = "PDC11 cell line Differentially Methylated Probes Heatmap",  merge_legend = TRUE)
+
+dev.off()
+
+ png(paste0("H358_heatmap_resized.png"),
+     width =  14,
+     height = sizemod$coefficients[2]*NROW(betas_H358) + sizemod$coefficients[1]+2,
+     units = "in",
+     res = 96
+     )
+ComplexHeatmap::draw(heat_list_H358, row_title = paste0("top ",NROW(betas_H358) ," across-sample EPICv1 most variable sites"), row_title_gp = gpar(col = "darkblue") , height = unit(1*1/96, "inch")*NROW(betas_H358), column_title = "H358 cell line Differentially Methylated Probes Heatmap",  merge_legend = TRUE)
+
+dev.off()
+
+
+ png(paste0("H2009_heatmap_resized.png"),
+     width =  14,
+     height = sizemod$coefficients[2]*NROW(betas_H2009) + sizemod$coefficients[1],
+     units = "in",
+     res = 96
+     )
+ComplexHeatmap::draw(heat_list_H2009, row_title = paste0("top ",NROW(betas_H2009) ," across-sample EPICv1 most variable sites"), row_title_gp = gpar(col = "darkblue") , height = unit(1*1/96, "inch")*NROW(betas_H2009), column_title = "H2009 cell line Differentially Methylated Probes Heatmap",  merge_legend = TRUE)
+
+dev.off()
+    
+```
+
+::: {#fig-prop layout-nrow="1"}
+![PDC11](PDC11_heatmap_resized.png){#fig-surus}
+
+![H358](H358_heatmap_resized.png)
+
+![H2009](H2009_heatmap_resized.png)
+:::
+
+# 21/11/2023 Custom plots REQUEST:
+
+The objective now is to generate 4 plots.
+
+Individual plots:
+
+-   3 plots (1 plot x Cell Line) with the top 1000 variable sites within the cell line.
+
+Combined plot:
+
+-   1 plot with the top 3000 most variable sites across all the cell lines.
+
+## Function to select top n variable sites:
+
+```{r}
+top_beta <- function(beta_values, n=1000){
+  sdv <- apply(beta_values, 1, sd)
+  topn <- names(head(sort(sdv,decreasing=T), n))
+  beta_topn <- beta_values[topn,]
+  return(beta_topn)
+}
+```
+
+## Individual plots:
+
+### H2009
+
+Load the data:
+
+```{r H2009 indiv.top1kplot}
+ss_H2009 <- readRDS("data/ss_H2009.rds")
+betas_H2009 <- readRDS("data/betas_H2009.rds")
+DMPann_H2009 <- readRDS("data/DMPann_H2009.rds")
+idcol<-"Name"
+
+```
+
+Apply the function to select the top 1000 most variable sites:
+
+```{r H2009 betas_indiv}
+n = 1000                                               # change this value to select a different number of probes
+betas_H2009_heat <- top_beta(betas_H2009,n=n)
+```
+
+Generate the plot using the functions defined in the @sec-Heatmap section:
+
+```{r H2009 heatmap_indiv}
+heat_list_H2009 <- meth_heatmap(samplesheet = ss_H2009, bvals = betas_H2009_heat, annotation = DMPann_H2009, idcol = idcol)
+
+```
+
+Save with the desired resolution and titles:
+
+```{r H2009 draw heatmap_indiv}
+library(ComplexHeatmap)
+library(circlize)
+
+ComplexHeatmap::draw(heat_list_H2009, row_title = paste0("top ",n ," across-sample most variable sites"), row_title_gp = gpar(col = "darkblue") , height = unit(1*1/96, "inch")*n, column_title = paste0( "H2009 cell line top ", n, " most variable Probes Heatmap"),  merge_legend = TRUE)
+```
+
+### H358
+
+First we need to load the data:
+
+```{r}
+ss_H358 <- readRDS("data/ss_H358.rds")
+betas_H358 <- readRDS("data/betas_H358.rds")
+DMPann_H358 <- readRDS("data/DMPann_H358.rds")
+idcol<-"Name"
+```
+
+Then apply the function to select the top 1000 most variable sites:
+
+```{r}
+n = 1000                                               # change this value to select a different number of probes
+betas_H358_heat <- top_beta(betas_H358,n=n)
+```
+
+Now we can generate the plot this using the functions defined @sec-Heatmap:
+
+```{r}
+heat_list_H358 <- meth_heatmap(samplesheet = ss_H358, bvals = betas_H358_heat, annotation = DMPann_H358, idcol = idcol)
+
+```
+
+And finally save with the desired resolution and titles:
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+ComplexHeatmap::draw(heat_list_H358, row_title = paste0("top ",n ," across-sample most variable sites"), row_title_gp = gpar(col = "darkblue") , height = unit(1*1/96, "inch")*n, column_title = paste0( "H358 cell line top ", n, " most variable Probes Heatmap"),  merge_legend = TRUE)
+```
+
+### PDC11_batch2
+
+First we need to load the data:
+
+```{r}
+ss_PDC11_batch2 <- readRDS("data/ss_PDC11_batch2.rds")
+betas_PDC11_batch2 <- readRDS("data/betas_PDC11_batch2.rds")
+DMPann_PDC11_batch2 <- readRDS("data/DMPann_PDC11_batch2.rds").
+```
+
+::: callout-important
+# 🛑✋ idcol variable changes for PDC11
+
+In the `idcol` variable, we store the name of the probe that contains the methylation measure for a specific cg site. These probe names vary for EPIC v2 arrays but remain consistent for 450k and EPIC arrays. However, in the case of EPIC v2 arrays, we can utilize the information in the EPICv1_Loci column, which contains the equivalent cg site ID if available from the EPIC v1 array. This allows us to compare cg sites across different array types.
+:::
+
+```{r}
+idcol<-"EPICv1_Loci"
+```
+
+Then apply the function to select the top 1000 most variable sites:
+
+```{r}
+n = 1000                                               # change this value to select a different number of probes
+betas_PDC11_batch2_heat <- top_beta(betas_PDC11_batch2,n=n)
+```
+
+Now we can generate the plot this using the functions defined @sec-Heatmap:
+
+```{r}
+heat_list_PDC11_batch2 <- meth_heatmap(samplesheet = ss_PDC11_batch2, bvals = betas_PDC11_batch2_heat, annotation = DMPann_PDC11_batch2, idcol = idcol)
+
+```
+
+And finally save with the desired resolution and titles:
+
+```{r}
+library(ComplexHeatmap)
+library(circlize)
+
+ComplexHeatmap::draw(heat_list_PDC11_batch2, row_title = paste0("top ",n ," across-sample most variable sites"), row_title_gp = gpar(col = "darkblue") , height = unit(1*1/96, "inch")*n, column_title = paste0( "PDC11_batch2 cell line top ", n, " most variable Probes Heatmap"),  merge_legend = TRUE)
+```
+
+## Combined plot:
+
+In this case we are going to combine the 3 cell lines into the same plot so we can compare between cell lines. In order to see differences between the cell lines we could choose one of these options:
+
+Option A: Use the top variable sites across all samples (same approach as before but using all samples now)
+
+    - Identify Top Variable Sites:
+        Calculate variability for each site across all samples.
+        Select the top variable sites based on this calculation.
+
+    - Generate Combined Plot:
+        Plot the selected top variable sites. 
+        Use different colors or symbols for each cell line.
+        
+
+Option B: Merge the top 1000 sites from each cell line
+
+    - Use the Top 1000 Sites for each Cell Line we have calculated above.
+    - Merge into a Combined Pool.
+    - Generate Combined Plot.
+
+In this case we are going to choose option B, but I am sure you will be able to reproduce the steps to make option A 😉.
+
+Combine the top1000 sites for each cell line into a single set of probes:
+
+```{r}
+l_betas_ids <- list(rownames(betas_PDC11_batch2_heat),rownames(betas_H358_heat),rownames(betas_H2009_heat))
+common_cgsites <- Reduce(union,l_betas_ids)
+length(common_cgsites)
+```
+
+Combine the beta values for those sites from all the cell lines:
+
+```{r}
+betas_combined <- cbind(betas_H2009[common_cgsites,],betas_H358[common_cgsites,])
+```
+
