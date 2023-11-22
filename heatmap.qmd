@@ -185,7 +185,7 @@ col_fun = colorRamp2(c(-1,-0.1, 0.1, 1), c("blue","white","white","red"))
 
 # Continuous, uses a predefined color palette or manual color vector
 col_fn<- function(x,n=100,palette=viridis::cividis(n)){
-  colorRamp2( seq(min(x),max(x),length.out=n), palette)
+  colorRamp2( seq(min(x,na.rm = T),max(x, na.rm = T),length.out=n), palette)
 }
 
 # Continuous, monochrome breakpoints based on values distribution (quartiles):
@@ -555,6 +555,7 @@ sizemod
 Now we use the formula to control for the plot size, so we can make the plots from the different cell lines proportional in row height:
 
 ```{r}
+#| eval: false
 #| cache: false
  png(paste0("PDC11_heatmap_resized.png"),
      width =  14,
@@ -590,7 +591,7 @@ dev.off()
 ```
 
 ::: {#fig-prop layout-nrow="1"}
-![PDC11](PDC11_heatmap_resized.png){#fig-surus}
+![PDC11](PDC11_heatmap_resized.png){#fig-proportional}
 
 ![H358](H358_heatmap_resized.png)
 
@@ -627,7 +628,9 @@ top_beta <- function(beta_values, n=1000){
 Load the data:
 
 ```{r H2009 indiv.top1kplot}
-ss_H2009 <- readRDS("data/ss_H2009.rds")
+#| cache: false
+
+ss_H2009 <- readRDS("data/ss_H2009.rds")[-1,]
 betas_H2009 <- readRDS("data/betas_H2009.rds")
 DMPann_H2009 <- readRDS("data/DMPann_H2009.rds")
 idcol<-"Name"
@@ -662,7 +665,8 @@ ComplexHeatmap::draw(heat_list_H2009, row_title = paste0("top ",n ," across-samp
 First we need to load the data:
 
 ```{r}
-ss_H358 <- readRDS("data/ss_H358.rds")
+#| cache: false
+ss_H358 <- readRDS("data/ss_H358.rds")[-1,]
 betas_H358 <- readRDS("data/betas_H358.rds")
 DMPann_H358 <- readRDS("data/DMPann_H358.rds")
 idcol<-"Name"
@@ -696,9 +700,10 @@ ComplexHeatmap::draw(heat_list_H358, row_title = paste0("top ",n ," across-sampl
 First we need to load the data:
 
 ```{r}
-ss_PDC11_batch2 <- readRDS("data/ss_PDC11_batch2.rds")
+#| cache: false
+ss_PDC11_batch2 <- readRDS("data/ss_PDC11_batch2.rds")[-1,]
 betas_PDC11_batch2 <- readRDS("data/betas_PDC11_batch2.rds")
-DMPann_PDC11_batch2 <- readRDS("data/DMPann_PDC11_batch2.rds").
+DMPann_PDC11_batch2 <- readRDS("data/DMPann_PDC11_batch2.rds")
 ```
 
 ::: callout-important
@@ -727,7 +732,7 @@ heat_list_PDC11_batch2 <- meth_heatmap(samplesheet = ss_PDC11_batch2, bvals = be
 
 And finally save with the desired resolution and titles:
 
-```{r}
+```{r PDC11 CL heatmap top1k}
 library(ComplexHeatmap)
 library(circlize)
 
@@ -759,15 +764,214 @@ In this case we are going to choose option B, but I am sure you will be able to 
 
 Combine the top1000 sites for each cell line into a single set of probes:
 
-```{r}
+```{r list betasID}
 l_betas_ids <- list(rownames(betas_PDC11_batch2_heat),rownames(betas_H358_heat),rownames(betas_H2009_heat))
 common_cgsites <- Reduce(union,l_betas_ids)
 length(common_cgsites)
 ```
 
-Combine the beta values for those sites from all the cell lines:
+Trim the beta values to contain only those sites (if present) for all the cell lines:
 
-```{r}
-betas_combined <- cbind(betas_H2009[common_cgsites,],betas_H358[common_cgsites,])
+```{r list common betas}
+library(data.table)
+l_betas <- list(betas_PDC11_batch2, betas_H358, betas_H2009)
+betas_trimmed <- lapply(l_betas,function(x){
+  dt <- as.data.table(x,keep.rownames = "id")
+  dt <- dt[common_cgsites,,on="id"]
+  return(dt)
+})
+
 ```
 
+Combine the beta values for all samples in a single object:
+
+```{r}
+common_betas <- Reduce(function(x,y)merge(x,y,by = 'id',all=T), betas_trimmed)
+b<- as.matrix(common_betas[,-1])
+rownames(b)<-common_betas$id
+common_betas <- b[complete.cases(b),]
+```
+
+::: callout-warning
+# NA action
+
+A total of 597 probes, out of the 2291 available, are absent for certain cell lines. This makes it impossible for the distance calculation algorithm to work since all values within the grouping factor are missing. To adress this issue this probes have been removed.
+:::
+
+
+Combine annotation and samplesheet:
+
+```{r}
+# Add arraytype in all sample sheets:
+ss_H2009[,arraytype:="EPIC"]
+ss_H358$arraytype <- "EPIC"
+common_ss <- rbindlist(list(ss_PDC11_batch2,ss_H2009,ss_H358),use.names=TRUE)
+# Make idcol consistent for EPICv2:
+DMPann_PDC11_batch2$Name <- DMPann_PDC11_batch2$EPICv1_Loci
+common_annotation <- rbindlist(list(DMPann_PDC11_batch2,DMPann_H2009,DMPann_H358),use.names=TRUE, fill=TRUE)
+colnames(common_betas) <- common_ss[colnames(b),Sample_Name,on="barcode"]
+```
+
+Modify the heatmap functions (#**):
+
+```{r}
+library(ComplexHeatmap)
+
+
+meth_heatmap2 <- function(samplesheet, bvals, annotation, idcol="rn"   ){
+  require(ComplexHeatmap)
+  require(data.table)
+  data.table::setDT(annotation)
+  setkeyv(annotation,idcol)
+  
+  # Annotation object for top annotation:
+  data.table::setDT(samplesheet)
+  # purity = samplesheet[,.SD,.SDcols=startsWith(names(samplesheet),"purity")]
+  ha_column = HeatmapAnnotation(
+    annotation_name_side = "left", 
+    
+    CL = anno_block( gp=gpar( fill=RColorBrewer::brewer.pal(n=length(unique(samplesheet$CL)) , name = "Accent")),                                                                             
+                      labels = as.character(unique(samplesheet$CL)), #unique(samplesheet$Type),                        #**
+                      labels_gp = gpar(col = "black", fontsize = 11)),                                  #**
+    Type = samplesheet$Type,
+
+
+    Condition = samplesheet$Condition,
+    # purity = unlist(purity),
+
+    col = #A list of named vectors were names = vector values and value = color.
+      list(
+      Condition = setNames(
+        palette.colors(length(unique(samplesheet$Condition)),
+                       palette = "Dark"
+                       ),
+        unique(samplesheet$Condition)
+      ),
+      Type = setNames(
+        rainbow(n=length(unique(samplesheet$Type))),
+        unique(samplesheet$Type)
+      ),
+      # purity = col_fbp(x=samplesheet,bp=seq(min(purity),max(purity),length.out=5),color="green3"),
+      NULL
+      )
+    
+  )
+  
+  heat_list<-ComplexHeatmap::Heatmap(
+    matrix = bvals, 
+    #Color:
+    col=col_fn(bvals),#col_fun, # Color defined in col_fun above
+    na_col="grey",
+    
+    #Label:
+    heatmap_legend_param = list(
+    at = c(0, 0.5, 1),
+    # labels = c("hypo", 0, "hyper"),
+    title = paste0(expression(beta),"-vals"),
+    legend_height = unit(4, "cm"),
+    title_position = "leftcenter-rot"
+    ),
+    
+    
+    #Rows:
+    show_row_names = F,
+    #row_title = "Amino acids",
+    row_names_side = "left",
+    #left_annotation = ha_boxplot,
+    # clustering_distance_rows = "manhattan",
+    
+    #Columns:
+    show_column_names = TRUE,
+    column_names_side = "top",
+    column_title_side = "bottom",
+    column_names_max_height = unit(4, "cm"),
+    column_names_gp = gpar(fontsize = 9),
+    column_names_rot = 90,
+    cluster_columns=F,
+    column_split = samplesheet$CL, #factor(samplesheet$Type,levels = c("Case","Control")),       #**
+    column_title = paste0(expression(beta)," values"),
+
+    #Annotation bar:
+    top_annotation = ha_column,
+   
+      
+    
+    #Aspect ratios:
+    #column_dend_height=unit(4, "cm")
+    heatmap_width = unit(2, "npc"),
+    heatmap_height = unit(16, "cm")
+  )
+  
+  ann<-annotation[,.(V1=unique(Relation_to_Island)),by=idcol]
+  
+  mat<-ann[rownames(bvals),,on=idcol][!duplicated(Name),V1]                                             #**
+  heat_list<-heat_list + 
+    Heatmap(
+      matrix = mat, 
+      name = "Relation to island",
+      #Color:
+      col=setNames(palette.colors(length(unique(annotation$Relation_to_Island)),palette = "Set1"),sort(unique(annotation$Relation_to_Island))),#col_fun, # Color defined in col_fun above
+      #Legend:
+      show_heatmap_legend = TRUE,
+      show_column_names = TRUE,
+      column_names_side = "top",
+      column_names_max_height = unit(2, "cm"),
+      column_names_gp = gpar(fontsize = 9),
+      column_names_rot = 90,
+      heatmap_width = unit(1, "npc"),
+            
+                )
+} 
+```
+
+Generate the heatmap:
+
+```{r}
+heat_list_common <- meth_heatmap2(samplesheet = common_ss, bvals = common_betas, annotation = common_annotation, idcol = "Name")
+```
+
+Adjust dimensions:
+
+```{r}
+#| eval: false
+library(ComplexHeatmap)
+plotsizes=c(100,200)
+y = NULL
+for(nr in plotsizes) {
+  betas<-top_beta(betas_PDC11,nr)
+  
+    ht = ComplexHeatmap::draw(meth_heatmap2(samplesheet = common_ss, bvals = common_betas, annotation = common_annotation, idcol = "Name"),height=unit(1/96, "inch")*nr)
+    ht_height = sum(component_height(ht)) + unit(4, "mm")
+    ht_height = convertHeight(ht_height, "inch", valueOnly = TRUE)
+    y = c(y, ht_height)
+}
+sizemod <- lm(y ~ plotsizes)
+sizemod
+```
+
+
+
+Draw and save:
+
+```{r}
+#| eval: false
+ png(paste0("Combined_heatmap_resized.png"),
+     width =  14,
+     height = sizemod$coefficients[2]*NROW(common_betas) + sizemod$coefficients[1],
+     units = "in",
+     res = 96
+     )
+ComplexHeatmap::draw(heat_list_common,
+                     row_title = paste0("cg Sites"),
+                     row_title_gp = gpar(col = "darkblue"),
+                     height = unit(1*1/96, "inch")*NROW(common_betas),
+                     column_title = paste0( "Combined Cell Lines: Top 1000 Most Variable Sites from each Cell Line"),
+                     merge_legend = TRUE
+                     )
+
+dev.off()
+
+
+```
+::: {#fig-comb layout-nrow="1"}
+![top1k_combined](Combined_heatmap_resized.png){#fig-combined}
