@@ -1,6 +1,7 @@
 ---
-title: "preprocess"
+title: "ATF7IP Heatmaps Walkthrough"
 author: "Izar de Villasante"
+description: "The following report is a walkthrough to create heatmaps from beta values."
 params:
   ss: "samplesheet_FULL"
   betas: "betas_FULL"
@@ -15,7 +16,14 @@ format:
 # server: shiny
 execute:
   cache: true
+  warning: false
+knitr: 
+  opts_chunk: 
+    message: false 
+    
 ---
+
+
 
 ```{r}
 #| context: data
@@ -33,21 +41,29 @@ ss<-data.table::as.data.table(tar_read(ss_clean_PDC11_batch2))
 
 ```
 
-## Illumina Infinium Methylation Arrays
 
-This technical guide covers how to analyze Illumina methylation Beadchips arrays commonly known as EPIC/450K methylation arrays. [here some description about a methylation array and how it is prepeared...](https://emea.support.illumina.com/content/dam/illumina-support/documents/documentation/chemistry_documentation/infinium_assays/infinium_hd_methylation/infinium-hd-methylation-guide-15019519-01.pdf)
+::: {.callout-note}
+This project utilized the bioinformatics unit's DNAmethylation pipeline. In the initial section of the report, the 'targets' library was employed to directly load data from the pipeline output. Additionally, the resulting objects have been saved under the 'data/' directory, facilitating reproducibility. For the second part, outlined in the second part of the analysis @sec-part2, the files were loaded as they would be if the repository is cloned, requiring no adjustments in that regard
+:::
 
-## Preprocessing
+# Sample sheet
 
-The first step once you have your data is to load it to R in an appropriate format. The ´minfi´ packages provides read.metharray functions for this purpose. Also the functions `read.metharray.sheet`, `read.metharray.exp` can be used. Those are wrappers around `read.metharray` to make it easier for the user. [Check this guideline](https://bioconductor.org/packages/devel/bioc/vignettes/minfi/inst/doc/minfi.html#3_Reading_data) or type `vignette("minfi)` on an R console for more info. In this case a built in function `cnv.methyl::read.metharray.exp.par()` is used which is a wrapper for minfi formula with parallelization to speed up this process a little bit.
+The sample sheet contains inforamtion about your samples and the experimental setup. It is mandatory to respect the column names in order to make the pipline work. 
 
-In order to use any of this formulas we first need to generate the sample_sheet.
+## It must contain the following columns: 
 
-### Sample sheet
+- Sample_Name 
+- Basename
 
-The sample sheet contains inforamtion about your samples and the experimental setup. It is mandatory to respect the column names in order to make the pipline work. ##It must contain the following columns: - Sample_Name - Basename
+## Other recommended columns with technical details. Can be used to track and detect batch effects: 
 
-##Other recommended columns with technical details. Can be used to track and detect batch effects: - Project - Pool_ID - Sample_Plate - Sample_Well - Sample_Group - Sentrix_ID - Sentrix_Position
+- Project 
+- Pool_ID 
+- Sample_Plate 
+- Sample_Well 
+- Sample_Group 
+- Sentrix_ID 
+- Sentrix_Position
 
 ##Pheno columns: - Gender (will be predicted) - Type - Condition - Any other information
 
@@ -171,11 +187,10 @@ renderDT<- function(data){
 dtable(data.table::as.data.table(ss))
 ```
 
-## Heatmap {#sec-Heatmap}
+## Heatmap functions {#sec-Heatmap}
 
 First of all let's define some functions for the color scales our heatmap will use:
 
-### Color functions:
 
 ```{r}
 library(ComplexHeatmap)
@@ -208,9 +223,8 @@ col_fbp <- function(x,bp,color){
 
 ```
 
-### Heatmaps function
 
-Here we define the function for the heat maps
+Here we define the function to generate the heat maps:
 
 ```{r heatmap function}
 library(ComplexHeatmap)
@@ -357,9 +371,14 @@ meth_heatmap <- function(samplesheet, bvals, annotation, idcol="rn"   ){
 
 ## PDC11
 
-### Methylation data: The 2-channel methylation intensity file format .idat
+### Load data
+
+Data is loaded via targets packages from the output of running the pipeline.
+
+To generate the heatmaps we need the samplesheet, the beta values (methylation values) and the differentially methylated probed -DMPS-  (with annotation about their genomic context).
 
 ```{r}
+# load sampleshhet and betas
 ss_PDC11 <- data.table::as.data.table(tar_read(ss_clean_PDC11_batch2))
 betas_PDC11 <- tar_read(betas_PDC11_batch2)
 colnames(betas_PDC11) <- ss_PDC11[colnames(betas_PDC11),Sample_Name,on="barcode"]
@@ -367,15 +386,8 @@ colnames(betas_PDC11) <- ss_PDC11[colnames(betas_PDC11),Sample_Name,on="barcode"
 # Sort by type:
 ss_PDC11 <- setorder(ss_PDC11,Type)
 betas_PDC11<-betas_PDC11[,ss_PDC11$Sample_Name]
-```
 
-### DMPs Annotation data:
-
-A dataframe with differentially methylated probes and annotation.
-
-```{r}
-library(data.table)
-
+# load dmps:
 DMPann_PDC11<-tar_read(dmps_mod1_PDC11_batch2)
 DMPann_PDC11<-data.table::setDT(DMPann_PDC11)
 idcol<-"EPICv1_Loci"
@@ -400,26 +412,18 @@ ComplexHeatmap::draw(heat_list_PDC11, row_title = paste0("top ",NROW(betas_PDC11
 
 ## H358
 
-### Methylation data: The 2-channel methylation intensity file format .idat
+### Load data:
 
 ```{r}
+library(data.table)
+# samplesheet & betas:
 ss_H358 <- data.table::as.data.table(tar_read(ss_clean_H358))
 betas_H358 <- tar_read(top_H358)
 colnames(betas_H358) <- ss_H358[colnames(betas_H358),Sample_Name,on="barcode"]
 # Sort by type:
 setorder(ss_H358,Type)
 betas_H358<-betas_H358[,ss_H358$Sample_Name]
-
-
-```
-
-### DMPs Annotation data:
-
-A dataframe with differentially methylated probes and annotation.
-
-```{r}
-library(data.table)
-
+# Annotation:
 DMPann_H358<-tar_read(dmps_mod1_H358)
 DMPann_H358<-data.table::setDT(DMPann_H358)
 idcol<-"Name"
@@ -444,25 +448,17 @@ ComplexHeatmap::draw(heat_list_H358, row_title = paste0("top ",NROW(betas_H358),
 
 ## H2009
 
-### Methylation data: The 2-channel methylation intensity file format .idat
+### Load data:
 
 ```{r}
+# samplesheet & betas:
 ss_H2009 <- data.table::as.data.table(tar_read(ss_clean_H2009))
 betas_H2009 <- tar_read(top_H2009)
 colnames(betas_H2009) <- ss_H2009[colnames(betas_H2009),Sample_Name,on="barcode"]
 # Sort by type:
 setorder(ss_H2009,Type)
 betas_H2009<-betas_H2009[,ss_H2009$Sample_Name]
-
-```
-
-### DMPs Annotation data:
-
-A dataframe with differentially methylated probes and annotation.
-
-```{r}
-library(data.table)
-
+# Annotation:
 DMPann_H2009<-tar_read(dmps_mod1_H2009)
 DMPann_H2009<-data.table::setDT(DMPann_H2009)
 idcol<-"Name"
@@ -598,7 +594,7 @@ dev.off()
 ![H2009](H2009_heatmap_resized.png)
 :::
 
-# 21/11/2023 Custom plots REQUEST:
+# 21/11/2023 Custom plots REQUEST: {#sec-part2}
 
 The objective now is to generate 4 plots.
 
