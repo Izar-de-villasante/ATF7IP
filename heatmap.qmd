@@ -818,11 +818,13 @@ Modify the heatmap functions (#**):
 library(ComplexHeatmap)
 
 
-meth_heatmap2 <- function(samplesheet, bvals, annotation, idcol="rn"   ){
+meth_heatmap2 <- function(samplesheet, bvals, annotation, idcol="rn", sample_ids = "Sample_Name"   ){
   require(ComplexHeatmap)
   require(data.table)
   data.table::setDT(annotation)
   setkeyv(annotation,idcol)
+  # Order beta values same as samplesheet:
+  bvals <- bvals[,with(samplesheet,get(sample_ids))]
   
   # Annotation object for top annotation:
   data.table::setDT(samplesheet)
@@ -831,7 +833,7 @@ meth_heatmap2 <- function(samplesheet, bvals, annotation, idcol="rn"   ){
     annotation_name_side = "left", 
     
     CL = anno_block( gp=gpar( fill=RColorBrewer::brewer.pal(n=length(unique(samplesheet$CL)) , name = "Accent")),                                                                             
-                      labels = as.character(unique(samplesheet$CL)), #unique(samplesheet$Type),                        #**
+                      labels = unique(samplesheet$CL), #unique(samplesheet$Type),                        #**
                       labels_gp = gpar(col = "black", fontsize = 11)),                                  #**
     Type = samplesheet$Type,
 
@@ -888,7 +890,7 @@ meth_heatmap2 <- function(samplesheet, bvals, annotation, idcol="rn"   ){
     column_names_gp = gpar(fontsize = 9),
     column_names_rot = 90,
     cluster_columns=F,
-    column_split = samplesheet$CL, #factor(samplesheet$Type,levels = c("Case","Control")),       #**
+    column_split = droplevels(samplesheet$CL), #factor(samplesheet$Type,levels = c("Case","Control")),       #**
     column_title = paste0(expression(beta)," values"),
 
     #Annotation bar:
@@ -968,10 +970,9 @@ ComplexHeatmap::draw(heat_list_common,
                      column_title = paste0( "Combined Cell Lines: Top 1000 Most Variable Sites from each Cell Line"),
                      merge_legend = TRUE
                      )
-
 dev.off()
-
-
 ```
 ::: {#fig-comb layout-nrow="1"}
+
 ![top1k_combined](Combined_heatmap_resized.png){#fig-combined}
+:::
