@@ -976,3 +976,148 @@ dev.off()
 
 ![top1k_combined](Combined_heatmap_resized.png){#fig-combined}
 :::
+
+
+You could also want the columns to be clustered instead of sorted by cell line:
+
+```{r}
+library(ComplexHeatmap)
+
+
+meth_heatmap3 <- function(samplesheet, bvals, annotation, idcol="rn", sample_ids = "Sample_Name"   ){
+  require(ComplexHeatmap)
+  require(data.table)
+  data.table::setDT(annotation)
+  setkeyv(annotation,idcol)
+  # Order beta values same as samplesheet:
+  bvals <- bvals[,with(samplesheet,get(sample_ids))]
+  
+  # Annotation object for top annotation:
+  data.table::setDT(samplesheet)
+  # purity = samplesheet[,.SD,.SDcols=startsWith(names(samplesheet),"purity")]
+  ha_column = HeatmapAnnotation(
+    annotation_name_side = "left", 
+    
+    CL = samplesheet$CL,
+    Type = samplesheet$Type,
+    Condition = samplesheet$Condition,
+    # purity = unlist(purity),
+
+    col = #A list of named vectors were names = vector values and value = color.
+      list(
+      Condition = setNames(
+        palette.colors(length(unique(samplesheet$Condition)),
+                       palette = "Dark"
+                       ),
+        unique(samplesheet$Condition)
+      ),
+      Type = setNames(
+        rainbow(n=length(unique(samplesheet$Type))),
+        unique(samplesheet$Type)
+      ),
+      CL = setNames(
+        RColorBrewer::brewer.pal(n=length(unique(samplesheet$CL)) , name = "Accent"),
+        unique(samplesheet$CL)
+      ),
+      # purity = col_fbp(x=samplesheet,bp=seq(min(purity),max(purity),length.out=5),color="green3"),
+      NULL
+      )
+    
+  )
+  
+  heat_list<-ComplexHeatmap::Heatmap(
+    matrix = bvals, 
+    #Color:
+    col=col_fn(bvals),#col_fun, # Color defined in col_fun above
+    na_col="grey",
+    
+    #Label:
+    heatmap_legend_param = list(
+    at = c(0, 0.5, 1),
+    # labels = c("hypo", 0, "hyper"),
+    title = paste0(expression(beta),"-vals"),
+    legend_height = unit(4, "cm"),
+    title_position = "leftcenter-rot"
+    ),
+    
+    
+    #Rows:
+    show_row_names = F,
+    #row_title = "Amino acids",
+    row_names_side = "left",
+    #left_annotation = ha_boxplot,
+    # clustering_distance_rows = "manhattan",
+    
+    #Columns:
+    show_column_names = TRUE,
+    column_names_side = "top",
+    column_title_side = "bottom",
+    column_names_max_height = unit(4, "cm"),
+    column_names_gp = gpar(fontsize = 9),
+    column_names_rot = 90,
+    cluster_columns=T,
+    column_km = 3,
+    column_title = paste0(expression(beta)," values"),
+
+    #Annotation bar:
+    top_annotation = ha_column,
+   
+      
+    
+    #Aspect ratios:
+    #column_dend_height=unit(4, "cm")
+    heatmap_width = unit(2, "npc"),
+    heatmap_height = unit(16, "cm")
+  )
+  
+  ann<-annotation[,.(V1=unique(Relation_to_Island)),by=idcol]
+  
+  mat<-ann[rownames(bvals),,on=idcol][!duplicated(Name),V1]                                             #**
+  heat_list<-heat_list + 
+    Heatmap(
+      matrix = mat, 
+      name = "Relation to island",
+      #Color:
+      col=setNames(palette.colors(length(unique(annotation$Relation_to_Island)),palette = "Set1"),sort(unique(annotation$Relation_to_Island))),#col_fun, # Color defined in col_fun above
+      #Legend:
+      show_heatmap_legend = TRUE,
+      show_column_names = TRUE,
+      column_names_side = "top",
+      column_names_max_height = unit(2, "cm"),
+      column_names_gp = gpar(fontsize = 9),
+      column_names_rot = 90,
+      heatmap_width = unit(1, "npc"),
+            
+                )
+} 
+```
+
+```{r}
+heat_list_common_dend <- meth_heatmap3(samplesheet = common_ss, bvals = common_betas, annotation = common_annotation, idcol = "Name")
+
+```
+
+Draw and save:
+
+```{r}
+#| eval: false
+ png(paste0("Combined_heatmap_resized_dend.png"),
+     width =  14,
+     height = sizemod$coefficients[2]*NROW(common_betas) + sizemod$coefficients[1],
+     units = "in",
+     res = 96
+     )
+ComplexHeatmap::draw(heat_list_common_dend,
+                     row_title = paste0("cg Sites"),
+                     row_title_gp = gpar(col = "darkblue"),
+                     height = unit(1*1/96, "inch")*NROW(common_betas),
+                     column_title = paste0( "Combined Cell Lines: Top 1000 Most Variable Sites from each Cell Line"),
+                     merge_legend = TRUE
+                     )
+dev.off()
+```
+::: {#fig-comb-dend layout-nrow="1"}
+
+![top1k_combined_dend](Combined_heatmap_resized_dend.png){#fig-combined}
+:::
+
